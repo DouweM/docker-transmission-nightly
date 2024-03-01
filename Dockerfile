@@ -7,35 +7,103 @@ FROM ghcr.io/linuxserver/baseimage-alpine:edge
 ARG BUILD_DATE
 ARG VERSION
 ARG TRANSMISSION_VERSION
+ARG pkgver=4.0.5
 LABEL build_version="Linuxserver.io version:- ${VERSION} Build-date:- ${BUILD_DATE}"
 LABEL maintainer="aptalca"
+
+# Note: This rebuilds the web UI to avoid issues such as https://github.com/transmission/transmission/issues/6632
+# Note: This downgrades GTKMM4 as it's outdated on alpine https://pkgs.alpinelinux.org/package/edge/community/x86/gtkmm4
+# Note: This deletes .git to build as release not debug build
 
 RUN \
   echo "**** install build packages ****" && \
   apk add --no-cache --virtual=build-dependencies \
-    build-base && \
+    build-base \
+    clang \
+    cmake \
+    curl-dev \
+    dbus-glib-dev \
+    git \
+    gtkmm4-dev \
+    libdeflate-dev \
+    libevent-dev \
+    libpsl-dev \
+    llvm \
+    miniupnpc-dev \
+    npm \
+    openssl-dev \
+    qt6-qtsvg-dev \
+    qt6-qttools-dev \
+    samurai && \
   echo "**** install packages ****" && \
   apk add --no-cache \
     findutils \
+    libdeflate \
+    libevent \
+    miniupnpc \
     p7zip \
     python3 && \
+  echo "**** compile transmission ****" && \
+  mkdir -p /tmp/transmission && \
+  git clone https://github.com/transmission/transmission.git /tmp/transmission && \
+  cd /tmp/transmission && \
+  git submodule init && \
+  git submodule update && \
+  rm -rf .git && \
+  sed -i -e 's/set(GTKMM4_MINIMUM 4.11.1)/set(GTKMM4_MINIMUM 4.10.0)/g' CMakeLists.txt && \ 
+  sed -i -e 's/set(TR_VERSION_MINOR "1")/set(TR_VERSION_MINOR "0")/g' CMakeLists.txt && \ 
+  sed -i -e 's/set(TR_VERSION_PATCH "0")/set(TR_VERSION_PATCH "5")/g' CMakeLists.txt && \ 
+  sed -i -e 's/set(TR_VERSION_DEV TRUE)/set(TR_VERSION_DEV FALSE)/g' CMakeLists.txt && \ 
+  npm --prefix web ci && \
+  npm --prefix web run build && \
+  echo "**** build ****" && \
+  CC=clang \
+	CXX=clang++ \
+	CXXFLAGS="$CXXFLAGS -flto -O2 -DNDEBUG" \
+	CFLAGS="$CFLAGS -flto -O2 -DNDEBUG" \
+	cmake -B build -G Ninja \
+		-DCMAKE_INSTALL_PREFIX=/usr \
+		-DCMAKE_INSTALL_LIBDIR=lib \
+		-DCMAKE_BUILD_TYPE=None \
+		-DBUILD_SHARED_LIBS=OFF \
+		-DDISABLE_DEPRECATED=OFF \
+		-DENABLE_CLI=ON \
+		-DENABLE_GTK=ON \
+		-DENABLE_NLS=ON \
+		-DENABLE_QT=ON \
+		-DENABLE_TESTS="$(want_check && echo ON || echo OFF)" \
+		-DINSTALL_LIB=OFF \
+		-DRUN_CLANG_TIDY=OFF \
+		-DUSE_GTK_VERSION=4 \
+		-DUSE_QT_VERSION=6 \
+		-DUSE_SYSTEM_DEFLATE=ON \
+		-DUSE_SYSTEM_EVENT2=ON \
+		-DUSE_SYSTEM_MINIUPNPC=ON \
+		-DUSE_SYSTEM_PSL=ON \
+		-DWITH_CRYPTO="openssl" \
+		-DWITH_SYSTEMD=OFF && \
+	cmake --build build && \
+  echo "**** manuall run pre-instal  from aports ****" && \
+  curl -o "/tmp/transmission-daemon.pre-install" "https://git.alpinelinux.org/aports/plain/community/transmission/transmission-daemon.pre-install" && \
+  chmod +x /tmp/transmission-daemon.pre-install && /tmp/transmission-daemon.pre-install && \
   echo "**** install transmission ****" && \
-  if [ -z ${TRANSMISSION_VERSION+x} ]; then \
-    TRANSMISSION_VERSION=$(curl -sL "http://dl-cdn.alpinelinux.org/alpine/edge/community/x86_64/APKINDEX.tar.gz" | tar -xz -C /tmp \
-    && awk '/^P:transmission$/,/V:/' /tmp/APKINDEX | sed -n 2p | sed 's/^V://'); \
-  fi && \
-  apk add --no-cache \
-    transmission-cli==${TRANSMISSION_VERSION} \
-    transmission-daemon==${TRANSMISSION_VERSION} \
-    transmission-extra==${TRANSMISSION_VERSION} \
-    transmission-remote==${TRANSMISSION_VERSION} && \
+  cmake --install build && \ 
+  mkdir -p /etc/conf.d/ && \ 
+  mkdir -p /etc/init.d/ && \ 
+  echo "**** manually copy config from aports ****" && \
+  curl -o "/etc/conf.d/transmission-daemon" "https://git.alpinelinux.org/aports/plain/community/transmission/transmission-daemon.confd" && \
+  curl -o "/etc/init.d/transmission-daemon" "https://git.alpinelinux.org/aports/plain/community/transmission/transmission-daemon.initd" && \
+  chmod +x /etc/init.d/transmission-daemon && \
+  curl -o "/etc/logrotate.d/transmission-daemon" "https://git.alpinelinux.org/aports/plain/community/transmission/transmission-daemon.logrotate" && \
+  curl -o "/tmp/transmission-daemon.post-upgrade" "https://git.alpinelinux.org/aports/plain/community/transmission/transmission-daemon.post-upgrade" && \
+  chmod +x /tmp/transmission-daemon.post-upgrade && /tmp/transmission-daemon.post-upgrade && \
   echo "**** cleanup ****" && \
   apk del --purge \
     build-dependencies && \
   rm -rf \
     /tmp/* \
     $HOME/.cache
-
+  
 # copy local files
 COPY root/ /
 
